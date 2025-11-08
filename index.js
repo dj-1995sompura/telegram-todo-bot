@@ -1,7 +1,8 @@
 // index.js
 import express from "express";
 import fetch from "node-fetch";
-import { Low, JSONFile } from "lowdb";
+import { Low } from "lowdb";
+import { JSONFile } from "lowdb/node";
 import { fileURLToPath } from "url";
 import path from "path";
 
