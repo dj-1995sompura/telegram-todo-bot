@@ -23,11 +23,11 @@ if (!TELE_TOKEN || !CHAT_ID || !JSONBIN_URL || !JSONBIN_KEY) {
 const TELE_BASE = `https://api.telegram.org/bot${TELE_TOKEN}`;
 
 // ========================
-// JSONBin Cloud Storage Helpers
+// JSONBin Cloud Storage Helpers (fixed)
 // ========================
 async function getData() {
   try {
-    const res = await fetch(JSONBIN_URL, {
+    const res = await fetch(`${JSONBIN_URL}/latest`, {
       headers: { "X-Master-Key": JSONBIN_KEY }
     });
     const json = await res.json();
@@ -40,14 +40,22 @@ async function getData() {
 
 async function saveData(data) {
   try {
-    await fetch(JSONBIN_URL, {
+    const res = await fetch(JSONBIN_URL, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        "X-Master-Key": JSONBIN_KEY
+        "X-Master-Key": JSONBIN_KEY,
+        "X-Bin-Versioning": "false"   // 🧠 prevent stale versions
       },
       body: JSON.stringify(data)
     });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("❌ JSONBin save failed:", errText);
+    } else {
+      console.log("✅ Data saved to JSONBin.");
+    }
   } catch (err) {
     console.error("❌ Failed to save data:", err);
   }
