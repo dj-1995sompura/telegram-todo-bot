@@ -1,197 +1,212 @@
-// index.js
+// ========================
+// Telegram To-Do Bot (Cloud + Auto Reminder)
+// ========================
+
 import express from "express";
 import fetch from "node-fetch";
-import { Low } from "lowdb";
-import { JSONFile } from "lowdb/node";
-import { fileURLToPath } from "url";
-import path from "path";
+import cron from "node-cron";
 
-// -------- CONFIG - put these into environment variables on Replit --------
-// TELE_TOKEN = Telegram bot token (from BotFather)
-// CHAT_ID   = your personal chat id (number)
-// -----------------------------------------------------------------------
+const app = express();
+app.use(express.json());
 
+// ----- Environment Variables -----
 const TELE_TOKEN = process.env.TELE_TOKEN;
-const CHAT_ID = process.env.CHAT_ID; // string or number
-if (!TELE_TOKEN || !CHAT_ID) {
-  console.error("Please set TELE_TOKEN and CHAT_ID in environment variables.");
+const CHAT_ID = process.env.CHAT_ID;
+const JSONBIN_URL = process.env.JSONBIN_URL;
+const JSONBIN_KEY = process.env.JSONBIN_KEY;
+
+if (!TELE_TOKEN || !CHAT_ID || !JSONBIN_URL || !JSONBIN_KEY) {
+  console.error("❌ Missing environment variables!");
   process.exit(1);
 }
 
 const TELE_BASE = `https://api.telegram.org/bot${TELE_TOKEN}`;
-const app = express();
-app.use(express.json()); // parse webhook JSON
 
-// ----- lowdb setup (db.json in same folder) -----
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const file = path.join(__dirname, "db.json");
-const adapter = new JSONFile(file);
-const db = new Low(adapter);
-
-async function initDB() {
-  await db.read();
-  db.data = db.data || { weekday: [], weekend: [] };
-  await db.write();
+// ========================
+// JSONBin Cloud Storage Helpers
+// ========================
+async function getData() {
+  try {
+    const res = await fetch(JSONBIN_URL, {
+      headers: { "X-Master-Key": JSONBIN_KEY }
+    });
+    const json = await res.json();
+    return json.record || { weekday: [], weekend: [] };
+  } catch (err) {
+    console.error("❌ Failed to fetch data:", err);
+    return { weekday: [], weekend: [] };
+  }
 }
-await initDB();
 
-// ---------- Helpers ----------
+async function saveData(data) {
+  try {
+    await fetch(JSONBIN_URL, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Master-Key": JSONBIN_KEY
+      },
+      body: JSON.stringify(data)
+    });
+  } catch (err) {
+    console.error("❌ Failed to save data:", err);
+  }
+}
+
+// ========================
+// Telegram Utility
+// ========================
 async function sendTelegram(text, parse_mode = "Markdown") {
-  const url = `${TELE_BASE}/sendMessage`;
   const body = {
-    chat_id: String(CHAT_ID),
+    chat_id: CHAT_ID,
     text,
     parse_mode
   };
   try {
-    const res = await fetch(url, {
+    await fetch(`${TELE_BASE}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
-    return res.json();
   } catch (err) {
-    console.error("Failed to send message:", err);
+    console.error("❌ Telegram send error:", err);
   }
 }
 
-function istDayType() {
-  // returns "weekday" or "weekend" using Asia/Kolkata timezone
-  const weekdayName = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Kolkata",
-    weekday: "long"
-  }).format(new Date());
-
-  // weekdayName like "Monday"
-  if (weekdayName === "Saturday" || weekdayName === "Sunday") return "weekend";
-  return "weekday";
-}
-
-function prettyList(list) {
+// ========================
+// Core Helpers
+// ========================
+function formatList(list) {
   if (!list || list.length === 0) return "_(empty)_";
   return list.map((t, i) => `${i + 1}. ${t}`).join("\n");
 }
 
-// ---------- Command handling ----------
-async function handleCommand(text, fromId) {
-  // commands: /add <weekday|weekend> <task...>
-  // /view <weekday|weekend>
-  // /edit <weekday|weekend> <index> <new text>
-  // /remove <weekday|weekend> <index>
-  // /lists
-  // /help
+function getListTypeByDay() {
+  const day = new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata", weekday: "long" });
+  return day === "Saturday" || day === "Sunday" ? "weekend" : "weekday";
+}
 
+// ========================
+// Command Handler
+// ========================
+async function handleCommand(text, fromId) {
+  if (String(fromId) !== String(CHAT_ID)) return; // safety check
   const parts = text.trim().split(" ");
   const cmd = parts[0].toLowerCase();
 
-  if (cmd === "/help") {
-    return sendTelegram(
-      `*Todo Bot Help*\n\n` +
-        `/add <weekday|weekend> <task> - add a task\n` +
-        `/view <weekday|weekend> - view tasks\n` +
-        `/edit <weekday|weekend> <index> <new task> - edit\n` +
-        `/remove <weekday|weekend> <index> - remove task\n` +
-        `/lists - show both lists`
-    );
-  }
+  const db = await getData();
 
-  if (cmd === "/lists") {
-    await db.read();
-    return sendTelegram(
-      `*Weekday:*\n${prettyList(db.data.weekday)}\n\n*Weekend:*\n${prettyList(db.data.weekend)}`
-    );
-  }
+  switch (cmd) {
+    case "/help":
+      return sendTelegram(
+        `*To-Do Bot Commands*\n\n` +
+        `/add <weekday|weekend> <task>\n` +
+        `/view <weekday|weekend>\n` +
+        `/edit <weekday|weekend> <index> <new task>\n` +
+        `/remove <weekday|weekend> <index>\n` +
+        `/lists — view both lists\n`
+      );
 
-  if (cmd === "/view") {
-    const listName = parts[1];
-    if (!["weekday", "weekend"].includes(listName)) {
-      return sendTelegram("Usage: /view <weekday|weekend>");
+    case "/lists":
+      return sendTelegram(
+        `*Weekday:*\n${formatList(db.weekday)}\n\n*Weekend:*\n${formatList(db.weekend)}`
+      );
+
+    case "/view": {
+      const list = parts[1];
+      if (!["weekday", "weekend"].includes(list))
+        return sendTelegram("Usage: /view <weekday|weekend>");
+      return sendTelegram(`*${list}*\n${formatList(db[list])}`);
     }
-    await db.read();
-    return sendTelegram(`*${listName}*\n${prettyList(db.data[listName])}`);
-  }
 
-  if (cmd === "/add") {
-    const listName = parts[1];
-    if (!["weekday", "weekend"].includes(listName)) {
-      return sendTelegram("Usage: /add <weekday|weekend> <task>");
+    case "/add": {
+      const list = parts[1];
+      const task = parts.slice(2).join(" ").trim();
+      if (!["weekday", "weekend"].includes(list) || !task)
+        return sendTelegram("Usage: /add <weekday|weekend> <task>");
+      db[list].push(task);
+      await saveData(db);
+      return sendTelegram(`✅ Added to *${list}*: ${task}`);
     }
-    const task = parts.slice(2).join(" ").trim();
-    if (!task) return sendTelegram("Please provide a task text.");
-    await db.read();
-    db.data[listName].push(task);
-    await db.write();
-    return sendTelegram(`Added to *${listName}*: ${task}`);
-  }
 
-  if (cmd === "/edit") {
-    const listName = parts[1];
-    const idx = Number(parts[2]);
-    const newText = parts.slice(3).join(" ").trim();
-    if (!["weekday", "weekend"].includes(listName) || !Number.isInteger(idx) || idx < 1 || !newText) {
-      return sendTelegram("Usage: /edit <weekday|weekend> <index> <new text>");
+    case "/edit": {
+      const list = parts[1];
+      const idx = Number(parts[2]);
+      const newText = parts.slice(3).join(" ").trim();
+      if (!["weekday", "weekend"].includes(list) || !idx || !newText)
+        return sendTelegram("Usage: /edit <weekday|weekend> <index> <new text>");
+      if (!db[list][idx - 1]) return sendTelegram("❌ Index out of range.");
+      const old = db[list][idx - 1];
+      db[list][idx - 1] = newText;
+      await saveData(db);
+      return sendTelegram(`✏️ Edited *${list}* ${idx}: "${old}" → "${newText}"`);
     }
-    await db.read();
-    if (!db.data[listName][idx - 1]) return sendTelegram("Index out of range.");
-    const old = db.data[listName][idx - 1];
-    db.data[listName][idx - 1] = newText;
-    await db.write();
-    return sendTelegram(`Edited *${listName}* ${idx}: "${old}" → "${newText}"`);
-  }
 
-  if (cmd === "/remove") {
-    const listName = parts[1];
-    const idx = Number(parts[2]);
-    if (!["weekday", "weekend"].includes(listName) || !Number.isInteger(idx) || idx < 1) {
-      return sendTelegram("Usage: /remove <weekday|weekend> <index>");
+    case "/remove": {
+      const list = parts[1];
+      const idx = Number(parts[2]);
+      if (!["weekday", "weekend"].includes(list) || !idx)
+        return sendTelegram("Usage: /remove <weekday|weekend> <index>");
+      const item = db[list].splice(idx - 1, 1);
+      await saveData(db);
+      return item.length
+        ? sendTelegram(`🗑️ Removed from *${list}*: ${item[0]}`)
+        : sendTelegram("❌ Index out of range.");
     }
-    await db.read();
-    const item = db.data[listName].splice(idx - 1, 1);
-    await db.write();
-    if (!item.length) return sendTelegram("Index out of range.");
-    return sendTelegram(`Removed from *${listName}*: ${item[0]}`);
-  }
 
-  // fallback: unrecognized command
-  return sendTelegram("Unknown command. Use /help for commands.");
+    default:
+      return sendTelegram("Unknown command. Use /help for usage.");
+  }
 }
 
-// ---------- Express routes ----------
-
-// GET / - manual or cron trigger: send today's list
+// ========================
+// Express Routes
+// ========================
 app.get("/", async (req, res) => {
-  await db.read();
-  const which = istDayType(); // weekday or weekend
-  const list = db.data[which] || [];
-  const header = `🗓️ *Good morning!* Here is your *${which}* list for today:\n\n`;
-  await sendTelegram(header + prettyList(list));
-  res.send("Sent today's to-do list.");
+  const db = await getData();
+  const listType = getListTypeByDay();
+  const list = db[listType];
+  const msg = list.length
+    ? `🗓️ Good morning, Digi!\nYour *${listType}* tasks:\n\n${formatList(list)}`
+    : `✅ You have no *${listType}* tasks today!`;
+  await sendTelegram(msg);
+  res.send("✅ Daily list sent to Telegram.");
 });
 
-// POST /webhook - Telegram webhook for incoming messages
 app.post("/webhook", async (req, res) => {
   try {
     const update = req.body;
-    // minimal handling: only process message text
-    if (update && update.message && update.message.text) {
-      const text = update.message.text;
-      const fromId = update.message.from.id;
-      // only accept commands from the configured CHAT_ID (safety)
-      if (String(fromId) !== String(CHAT_ID)) {
-        // ignore other users
-        return res.status(200).send("ignored");
-      }
-      // handle commands
-      await handleCommand(text, fromId);
+    console.log("Incoming update:", JSON.stringify(update, null, 2));
+    if (update?.message?.text) {
+      await handleCommand(update.message.text, update.message.from.id);
     }
     res.status(200).send("ok");
   } catch (err) {
-    console.error("webhook error", err);
+    console.error("Webhook error:", err);
     res.status(500).send("error");
   }
 });
 
-// start server
+// ========================
+// Internal Cron (10 AM IST)
+// ========================
+cron.schedule(
+  "0 10 * * *",
+  async () => {
+    console.log("⏰ Running daily 10 AM reminder...");
+    const db = await getData();
+    const listType = getListTypeByDay();
+    const list = db[listType];
+    const msg = list.length
+      ? `🗓️ Good morning, Digi!\nYour *${listType}* tasks:\n\n${formatList(list)}`
+      : `✅ No *${listType}* tasks today! Enjoy your day ☀️`;
+    await sendTelegram(msg);
+  },
+  { timezone: "Asia/Kolkata" }
+);
+
+// ========================
+// Start Server
+// ========================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
