@@ -199,7 +199,7 @@ app.post("/webhook", async (req, res) => {
 // Internal Cron (10 AM IST)
 // ========================
 cron.schedule(
-  "0 18 * * *",
+  "0 10 * * *",
   async () => {
     console.log("⏰ Running daily 10 AM reminder...");
     const db = await getData();
